@@ -1,0 +1,156 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Convertidor a PDF</title>
+<style>
+  :root { --bg:#f5f5f4; --card:#fff; --text:#1c1917; --muted:#78716c; --accent:#dc2626; --border:#d6d3d1; }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg:#1c1917; --card:#292524; --text:#f5f5f4; --muted:#a8a29e; --border:#44403c; }
+  }
+  * { box-sizing: border-box; }
+  body { margin:0; font-family:system-ui,sans-serif; background:var(--bg); color:var(--text); }
+  main { max-width:640px; margin:0 auto; padding:32px 16px; }
+  h1 { margin:0 0 4px; font-size:1.8rem; }
+  p.sub { margin:0 0 24px; color:var(--muted); }
+  #drop { display:block; border:2px dashed var(--border); border-radius:12px; background:var(--card);
+          padding:48px 16px; text-align:center; cursor:pointer; transition:border-color .15s; }
+  #drop.over, #drop:hover, #drop:focus-within { border-color:var(--accent); }
+  #drop strong { color:var(--accent); }
+  #drop input { position:absolute; width:1px; height:1px; opacity:0; }
+  label.opt { display:flex; gap:8px; align-items:center; margin:16px 0; color:var(--muted); }
+  ul { list-style:none; padding:0; margin:0; }
+  li { display:flex; justify-content:space-between; gap:12px; padding:10px 12px; background:var(--card);
+       border:1px solid var(--border); border-radius:8px; margin-bottom:8px; word-break:break-all; }
+  .ok { color:#16a34a; } .err { color:var(--accent); } .wait { color:var(--muted); }
+  /* contenedor fuera de pantalla para renderizar Word/texto antes de pasarlo a PDF */
+  .doc { width:180mm; padding:0; color:#000; background:#fff; font:11pt/1.5 Georgia,serif; }
+  .doc pre { white-space:pre-wrap; font:10pt/1.4 monospace; margin:0; }
+  .doc img { max-width:100%; }
+  .doc table { border-collapse:collapse; } .doc td, .doc th { border:1px solid #999; padding:4px; }
+</style>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/mammoth/1.6.0/mammoth.browser.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/html2pdf.js/0.10.1/html2pdf.bundle.min.js"></script>
+</head>
+<body>
+<main>
+  <h1>Convertidor a PDF</h1>
+  <p class="sub">Word (.docx), imágenes (JPG, PNG, WEBP, GIF), texto (.txt, .md, .csv) y HTML. Todo se procesa en tu navegador; nada se sube a internet.</p>
+
+  <label id="drop">
+    <input id="file" type="file" multiple accept=".docx,image/*,.txt,.md,.csv,.json,.html,.htm">
+    <div>Arrastra archivos aquí o <strong>haz clic para elegir</strong></div>
+  </label>
+
+  <label class="opt"><input id="merge" type="checkbox" checked> Unir todas las imágenes en un solo PDF</label>
+
+  <ul id="list"></ul>
+</main>
+
+<script>
+const $ = id => document.getElementById(id);
+const drop = $('drop'), list = $('list');
+
+const pdfName = f => f.name.replace(/\.[^.]+$/, '') + '.pdf';
+const ext = f => f.name.split('.').pop().toLowerCase();
+const isImage = f => f.type.startsWith('image/');
+const escapeHtml = s => s.replace(/[&<>]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));
+
+function row(text) {
+  const li = document.createElement('li');
+  li.innerHTML = '<span></span><span class="wait">Convirtiendo…</span>';
+  li.firstChild.textContent = text;
+  list.prepend(li);
+  return (cls, msg) => { li.lastChild.className = cls; li.lastChild.textContent = msg; };
+}
+
+function loadImage(file) {
+  return new Promise((res, rej) => {
+    const img = new Image();
+    img.onload = () => res(img);
+    img.onerror = () => rej(new Error('No se pudo leer la imagen'));
+    img.src = URL.createObjectURL(file);
+  });
+}
+
+// Cada imagen es una página A4, centrada y escalada con márgenes de 10 mm.
+async function imagesToPdf(files, name) {
+  const { jsPDF } = window.jspdf;
+  let pdf;
+  for (const file of files) {
+    const img = await loadImage(file);
+    const c = document.createElement('canvas');
+    c.width = img.naturalWidth; c.height = img.naturalHeight;
+    const ctx = c.getContext('2d');
+    ctx.fillStyle = '#fff'; ctx.fillRect(0, 0, c.width, c.height); // fondo blanco para PNG transparentes
+    ctx.drawImage(img, 0, 0);
+    URL.revokeObjectURL(img.src);
+
+    const orient = c.width > c.height ? 'l' : 'p';
+    if (!pdf) pdf = new jsPDF({ orientation: orient, unit: 'mm', format: 'a4' });
+    else pdf.addPage('a4', orient);
+    const pw = pdf.internal.pageSize.getWidth(), ph = pdf.internal.pageSize.getHeight();
+    const s = Math.min((pw - 20) / c.width, (ph - 20) / c.height);
+    const w = c.width * s, h = c.height * s;
+    pdf.addImage(c.toDataURL('image/jpeg', 0.92), 'JPEG', (pw - w) / 2, (ph - h) / 2, w, h);
+  }
+  pdf.save(name);
+}
+
+async function docToPdf(file) {
+  const e = ext(file);
+  let html;
+  if (e === 'docx') {
+    html = (await mammoth.convertToHtml({ arrayBuffer: await file.arrayBuffer() })).value;
+  } else if (e === 'html' || e === 'htm') {
+    html = await file.text();
+  } else if (['txt', 'md', 'csv', 'json'].includes(e) || file.type.startsWith('text/')) {
+    html = '<pre>' + escapeHtml(await file.text()) + '</pre>';
+  } else if (e === 'doc') {
+    throw new Error('.doc antiguo no soportado: guárdalo como .docx en Word');
+  } else {
+    throw new Error('Formato no soportado');
+  }
+  const el = document.createElement('div');
+  el.className = 'doc';
+  el.innerHTML = html;
+  await html2pdf().set({
+    margin: 15, filename: pdfName(file),
+    image: { type: 'jpeg', quality: 0.95 },
+    html2canvas: { scale: 2 },
+    jsPDF: { unit: 'mm', format: 'a4' },
+    pagebreak: { mode: ['css', 'legacy'] },
+  }).from(el).save();
+}
+
+async function handle(files) {
+  files = [...files];
+  const images = files.filter(isImage), others = files.filter(f => !isImage(f));
+
+  if ($('merge').checked && images.length > 1) {
+    const set = row(`${images.length} imágenes → imagenes.pdf`);
+    try { await imagesToPdf(images, 'imagenes.pdf'); set('ok', 'Listo ✓'); }
+    catch (err) { set('err', err.message); }
+  } else {
+    for (const f of images) {
+      const set = row(f.name);
+      try { await imagesToPdf([f], pdfName(f)); set('ok', 'Listo ✓'); }
+      catch (err) { set('err', err.message); }
+    }
+  }
+  for (const f of others) {
+    const set = row(f.name);
+    try { await docToPdf(f); set('ok', 'Listo ✓'); }
+    catch (err) { set('err', err.message); }
+  }
+}
+
+$('file').addEventListener('change', e => { handle(e.target.files); e.target.value = ''; });
+drop.addEventListener('dragover', e => { e.preventDefault(); drop.classList.add('over'); });
+drop.addEventListener('dragleave', () => drop.classList.remove('over'));
+drop.addEventListener('drop', e => { e.preventDefault(); drop.classList.remove('over'); handle(e.dataTransfer.files); });
+</script>
+</body>
+</html>
